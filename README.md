@@ -47,18 +47,18 @@ timeout_seconds = 120
 
 `device = "auto"` 优先使用 CUDA，否则使用 CPU。也可以填 `cpu`、`cuda` 或 `cuda:0`。首次请求会加载模型，其后的请求复用已加载的模型。每次运行一个合成请求，超时后下一次请求会重启推理进程。
 
-| 模型类型 | 音色设置 |
-| --- | --- |
-| CustomVoice | `speaker` 选择预设音色，如 `Vivian` 或 `Serena`。1.7B 模型可用 `instruct` 指定朗读风格。 |
-| VoiceDesign | `instruct` 填写音色描述。 |
-| Base | `ref_audio` 填写参考音频的本地绝对路径，建议用 WAV。`ref_text` 填写逐字稿，留空时只提取说话人音色。 |
+| 模型类型    | 音色设置                                                                                            |
+| ----------- | --------------------------------------------------------------------------------------------------- |
+| CustomVoice | `speaker` 选择预设音色，如 `Vivian` 或 `Serena`。1.7B 模型可用 `instruct` 指定朗读风格。            |
+| VoiceDesign | `instruct` 填写音色描述。                                                                           |
+| Base        | `ref_audio` 填写参考音频的本地绝对路径，建议用 WAV。`ref_text` 填写逐字稿，留空时只提取说话人音色。 |
 
 模型与音色详情见 [Qwen3-TTS 官方文档](https://github.com/QwenLM/Qwen3-TTS)。
 
 ## 使用
 
 - 在适配器已放行的 QQ 群聊或私聊发 `/tts 你好，我是麦麦`。插件将这段文字读成 QQ 语音。
-- 在普通聊天中说「请用语音回复」。当 MaiBot 的 Planner 选择 `local.qwen3-tts.voice` 回复扩展时，插件会朗读本次回复。扩展参数 `keep_text = true` 会同时保留文字。合成出错或文本超过 `max_chars` 时，MaiBot 继续发送原回复。
+- 在普通聊天中说「请用语音回复」。当 MaiBot 的 Planner 选择 `local.qwen-tts.voice` 回复扩展时，插件会朗读本次回复。扩展参数 `keep_text = true` 会同时保留文字。合成出错或文本超过 `max_chars` 时，MaiBot 继续发送原回复。
 - 命令和回复扩展使用当前会话。群聊中想限制 `/tts` 的使用范围，可以在 MaiBot 的 QQ 连接器访问策略中设置放行范围。
 
 若命令提示合成失败，查看插件日志中的 Python 或模型错误。若语音发送失败，检查 SnowLuma 是否在线、QQ 连接器的客户端类型是否为 `auto` 或 `snowluma`，以及适配器发送日志。
