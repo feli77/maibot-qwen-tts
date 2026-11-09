@@ -145,8 +145,10 @@ def _generate_wav(model: Any, request: dict[str, str]) -> bytes:
     arguments = {"text": request["text"], "language": request["language"], "max_new_tokens": 1024}
     model_type = model.model.tts_model_type
     if model_type == "custom_voice":
+        # The smaller CustomVoice checkpoint does not support style instructions.
+        instruct = None if getattr(model.model, "tts_model_size", None) == "0b6" else request["instruct"] or None
         waves, rate = model.generate_custom_voice(
-            **arguments, speaker=request["speaker"], instruct=request["instruct"] or None
+            **arguments, speaker=request["speaker"], instruct=instruct
         )
     elif model_type == "voice_design":
         if not request["instruct"]:

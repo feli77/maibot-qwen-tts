@@ -1,10 +1,20 @@
 """MaiBot command and reply extension for local Qwen3-TTS."""
 
 from base64 import b64encode
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, ClassVar, cast
 
-from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, ReplyExtension
+from maibot_sdk import (
+    Command,
+    ConfigWidget,
+    ConfigWidgetState,
+    Field,
+    MaiBotPlugin,
+    PluginConfigBase,
+    ReplyExtension,
+)
 
+from .installer import Installer, ModelSize
 from .tts import SynthesisError, SynthesisWorker
 
 COMPONENT_TIMEOUT_MS = 180_000
@@ -18,16 +28,57 @@ class PluginSettings(PluginConfigBase):
 class TTSSettings(PluginConfigBase):
     __ui_label__ = "本机 Qwen3-TTS"
 
-    python: str = Field(default="", description="TTS 环境中 Python 可执行文件的绝对路径")
-    model_dir: str = Field(default="", description="完整 Qwen3-TTS 模型目录的绝对路径")
-    device: str = Field(default="auto", pattern=r"^(auto|cpu|cuda(:[0-9]+)?)$", description="推理设备")
-    speaker: str = Field(default="Vivian", description="CustomVoice 预设音色")
-    language: str = Field(default="Auto", description="朗读语言，如 Auto、Chinese 或 English")
-    instruct: str = Field(default="", description="VoiceDesign 的音色描述，或 1.7B CustomVoice 的朗读风格")
-    ref_audio: str = Field(default="", description="Base 模型使用的本地参考音频绝对路径，建议用 WAV")
-    ref_text: str = Field(default="", description="参考音频的逐字稿，留空时只提取说话人音色")
-    max_chars: int = Field(default=120, ge=1, le=300, description="单次朗读的最大字符数")
-    timeout_seconds: int = Field(default=120, ge=5, le=150, description="模型启动和单次推理的总超时")
+    model_size: ModelSize = Field(
+        default="0.6B",
+        description="选择自动下载和加载的 CustomVoice 模型。1.7B 支持 Instruction Control。",
+        json_schema_extra={"label": "模型规格"},
+    )
+    device: str = Field(
+        default="auto",
+        pattern=r"^(auto|cpu|cuda(:[0-9]+)?)$",
+        description="auto 自动选择 CUDA 或 CPU，也可指定 cpu、cuda 或 cuda:0 等。",
+        json_schema_extra={"label": "推理设备"},
+    )
+    speaker: str = Field(
+        default="Vivian", description="CustomVoice 预设音色，如 Vivian 或 Serena。",
+        json_schema_extra={"label": "音色"},
+    )
+    language: str = Field(
+        default="Auto", description="朗读语言，如 Auto、Chinese 或 English。",
+        json_schema_extra={"label": "语言"},
+    )
+    instruct: str = Field(
+        default="",
+        description="1.7B CustomVoice 可用自然语言指定语气、情绪和语速。0.6B 会忽略此项。VoiceDesign 使用此项描述音色。",
+        json_schema_extra={
+            "label": "Instruction Control · 朗读指令",
+            "x-widget": "textarea",
+            "placeholder": "例如：用轻快、亲切的语气说，语速稍慢。",
+        },
+    )
+    max_chars: int = Field(default=120, ge=1, le=300, json_schema_extra={"label": "单次朗读字数上限"})
+    timeout_seconds: int = Field(
+        default=120, ge=5, le=150, description="包含模型启动和单次推理。",
+        json_schema_extra={"label": "合成超时（秒）"},
+    )
+    python: str = Field(
+        default="",
+        description="一键安装后留空。使用自己的推理环境时，填写 Python 可执行文件的绝对路径。",
+        json_schema_extra={"label": "手动 Python 路径", "group": "手动安装和参考音频"},
+    )
+    model_dir: str = Field(
+        default="",
+        description="一键安装后留空。填写本地模型目录的绝对路径时，优先使用该模型。",
+        json_schema_extra={"label": "手动模型目录", "group": "手动安装和参考音频"},
+    )
+    ref_audio: str = Field(
+        default="", description="Base 模型使用的本地参考音频绝对路径，建议用 WAV。",
+        json_schema_extra={"label": "参考音频", "group": "手动安装和参考音频"},
+    )
+    ref_text: str = Field(
+        default="", description="参考音频的逐字稿，留空时只提取说话人音色。",
+        json_schema_extra={"label": "参考音频逐字稿", "group": "手动安装和参考音频"},
+    )
 
 
 class Config(PluginConfigBase):
@@ -37,24 +88,89 @@ class Config(PluginConfigBase):
 
 class QwenTTSPlugin(MaiBotPlugin):
     config_model = Config
+    config_widgets: ClassVar[list[ConfigWidget]] = [
+        ConfigWidget(id="setup", kind="status", label="Qwen3-TTS 安装状态"),
+        ConfigWidget(id="install", kind="action", label="一键安装环境和模型"),
+    ]
 
     async def on_load(self) -> None:
         self._worker = SynthesisWorker()
+        self._installer = Installer(Path(self.ctx.paths.data_dir).resolve() / "qwen-tts")
 
     async def on_unload(self) -> None:
+        await self._installer.close()
         await self._worker.close()
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
         # Each synthesis reads the Runner's current config. The worker switches models as needed.
         pass
 
+    def _runtime_paths(self, settings: TTSSettings) -> tuple[Path | None, Path | None]:
+        python = settings.python.strip()
+        model = settings.model_dir.strip()
+        return (
+            Path(python) if python else self._installer.python_path(settings.device),
+            Path(model) if model else self._installer.model_path(settings.model_size),
+        )
+
+    @staticmethod
+    def _path_status(python: Path | None, model: Path | None) -> tuple[bool, bool]:
+        return (
+            python is not None and python.is_absolute() and python.is_file(),
+            model is not None and model.is_absolute() and (model / "config.json").is_file(),
+        )
+
+    async def get_config_widget_state(self) -> dict[str, ConfigWidgetState]:
+        settings = cast(Config, self.config).tts
+        installer = self._installer
+        python, model = self._runtime_paths(settings)
+        valid_python, valid_model = self._path_status(python, model)
+        if settings.python.strip():
+            python_status = "手动路径有效" if valid_python else "手动路径无效"
+        else:
+            python_status = f"已安装（{python.parent.parent.name}）" if python else "待安装"
+        if settings.model_dir.strip():
+            model_status = "手动路径有效" if valid_model else "手动路径无效"
+        else:
+            model_status = f"{settings.model_size} CustomVoice {'已下载' if valid_model else '待下载'}"
+        lines = [f"推理环境 · {python_status}", f"模型 · {model_status}"]
+        if installer.stage:
+            lines.extend(filter(None, (installer.stage, installer.detail)))
+        lines.append("请先保存模型和推理设备设置。自动安装的项目可将对应路径留空。")
+        return {
+            "setup": ConfigWidgetState(
+                text="\n".join(lines)[:2000],
+                tone="success" if valid_python and valid_model else "error" if installer.failed else "neutral",
+            ),
+            "install": ConfigWidgetState(disabled=installer.busy or (valid_python and valid_model)),
+        }
+
+    async def on_config_widget_action(self, action_id: str) -> None:
+        if action_id != "install":
+            raise ValueError("未知的安装操作")
+        settings = cast(Config, self.config).tts
+        valid_python, valid_model = self._path_status(*self._runtime_paths(settings))
+        if settings.python.strip() and not valid_python:
+            raise ValueError("手动 Python 路径无效，请修正路径或清空后保存。")
+        if settings.model_dir.strip() and not valid_model:
+            raise ValueError("手动模型目录无效，请修正路径或清空后保存。")
+        self._installer.start(
+            settings.model_size,
+            settings.device,
+            manual_python=bool(settings.python.strip()),
+            manual_model=bool(settings.model_dir.strip()),
+        )
+
     async def _synthesize(self, text: str) -> str:
         settings = cast(Config, self.config).tts
         if len(text) > settings.max_chars:
             raise SynthesisError(f"朗读文本最多 {settings.max_chars} 字，请缩短后重试。")
+        python, model = self._runtime_paths(settings)
+        if python is None or model is None:
+            raise SynthesisError("请先在插件设置中一键安装推理环境和模型，或填写本地路径。")
         audio = await self._worker.synthesize(
-            settings.python,
-            settings.model_dir,
+            str(python),
+            str(model),
             settings.device,
             settings.timeout_seconds,
             {
@@ -114,7 +230,7 @@ class QwenTTSPlugin(MaiBotPlugin):
         self, *, phase: str, parameters: dict[str, Any], messages: list[dict[str, Any]], **_: Any
     ) -> dict[str, Any]:
         settings = cast(Config, self.config).tts
-        if not settings.model_dir or not settings.python:
+        if not all(self._path_status(*self._runtime_paths(settings))):
             return {}
         if phase == "prepare":
             return {"extra_prompt": f"用适合朗读的自然口语作答，回复正文控制在 {settings.max_chars} 字以内。"}
