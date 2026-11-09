@@ -1,0 +1,19 @@
+{
+  "manifest_version": 2,
+  "id": "local.qwen3-tts",
+  "version": "1.0.0",
+  "name": "Qwen3-TTS QQ 语音",
+  "description": "使用本机 Qwen3-TTS 模型合成语音，并通过 SnowLuma 发到当前 QQ 会话。",
+  "author": {"name": "Local Developer", "url": "https://example.invalid/"},
+  "license": "UNLICENSED",
+  "urls": {"repository": "https://example.invalid/maibot-qwen-tts"},
+  "host_application": {"min_version": "1.3.18", "max_version": "1.3.99"},
+  "sdk": {"min_version": "2.19.0", "max_version": "2.22.99"},
+  "plugin_type": "media",
+  "dependencies": [
+    {"type": "plugin", "id": "maibot-team.snowluma-adapter", "version_spec": ">=1.1.13,<2.0.0"},
+    {"type": "python_package", "name": "maibot-plugin-sdk", "version_spec": ">=2.19,<3"}
+  ],
+  "capabilities": ["send.custom", "send.text"],
+  "i18n": {"default_locale": "zh-CN", "supported_locales": ["zh-CN"]}
+}
