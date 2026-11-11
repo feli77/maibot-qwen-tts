@@ -1,5 +1,6 @@
 """MaiBot command and reply extension for local Qwen3-TTS."""
 
+import asyncio
 from base64 import b64encode
 from pathlib import Path
 from typing import Any, ClassVar, cast
@@ -90,12 +91,13 @@ class QwenTTSPlugin(MaiBotPlugin):
     config_model = Config
     config_widgets: ClassVar[list[ConfigWidget]] = [
         ConfigWidget(id="setup", kind="status", label="Qwen3-TTS 安装状态"),
-        ConfigWidget(id="install", kind="action", label="一键安装环境和模型"),
+        ConfigWidget(id="install", kind="action", label="一键安装或升级环境和模型"),
     ]
 
     async def on_load(self) -> None:
         self._worker = SynthesisWorker()
-        self._installer = Installer(Path(self.ctx.paths.data_dir).resolve() / "qwen-tts")
+        data_dir = Path(self.ctx.paths.data_dir).resolve() / "qwen-tts"
+        self._installer = await asyncio.to_thread(Installer, data_dir)
 
     async def on_unload(self) -> None:
         await self._installer.close()
@@ -125,10 +127,14 @@ class QwenTTSPlugin(MaiBotPlugin):
         installer = self._installer
         python, model = self._runtime_paths(settings)
         valid_python, valid_model = self._path_status(python, model)
+        preferred_python = valid_python
         if settings.python.strip():
             python_status = "手动路径有效" if valid_python else "手动路径无效"
         else:
+            preferred_python = installer.python_path(settings.device, preferred_only=True) is not None
             python_status = f"已安装（{python.parent.parent.name}）" if python else "待安装"
+            if valid_python and not preferred_python:
+                python_status += "，可升级"
         if settings.model_dir.strip():
             model_status = "手动路径有效" if valid_model else "手动路径无效"
         else:
@@ -140,9 +146,9 @@ class QwenTTSPlugin(MaiBotPlugin):
         return {
             "setup": ConfigWidgetState(
                 text="\n".join(lines)[:2000],
-                tone="success" if valid_python and valid_model else "error" if installer.failed else "neutral",
+                tone="success" if preferred_python and valid_model else "error" if installer.failed else "neutral",
             ),
-            "install": ConfigWidgetState(disabled=installer.busy or (valid_python and valid_model)),
+            "install": ConfigWidgetState(disabled=installer.busy or (preferred_python and valid_model)),
         }
 
     async def on_config_widget_action(self, action_id: str) -> None:
@@ -214,7 +220,7 @@ class QwenTTSPlugin(MaiBotPlugin):
         except Exception:
             self.ctx.logger.exception("调用 MaiBot 语音发送能力失败")
 
-        await self.ctx.send.text("QQ 语音发送失败，请检查 SnowLuma 连接和适配器日志。", stream_id)
+        await self.ctx.send.text("QQ 语音发送失败，请检查当前 QQ 适配器的连接状态和日志。", stream_id)
         return False, "QQ 语音发送失败", True
 
     @ReplyExtension(

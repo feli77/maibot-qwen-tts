@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Literal
 
 ModelSize = Literal["0.6B", "1.7B"]
-TORCH_VERSION = "2.11.0"
+TORCH_VERSION = "2.15.0"
+TORCHAUDIO_VERSION = "2.11.1"
+LEGACY_TORCH_VERSION = "2.11.0"
 HF_REQUIREMENT = "huggingface-hub==2.4.0"
 CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 PROGRESS_PREFIX = "QWEN_TTS_PROGRESS "
@@ -59,29 +61,28 @@ def _uv_executable() -> str:
         return executable
 
 
-def _torch_build(device: str) -> str:
-    supports_cuda = sys.platform in ("win32", "linux") and platform.machine().lower() in ("amd64", "x86_64")
-    if device.startswith("cuda"):
-        if not supports_cuda:
-            raise RuntimeError("一键安装 CUDA 环境适用于 Windows 或 Linux x86-64，请选择 CPU 或使用手动环境。")
-        return "cu128"
-    if device == "auto" and supports_cuda:
-        try:
-            result = subprocess.run(
-                ["nvidia-smi"],
-                check=False,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=5,
-                creationflags=CREATE_FLAGS,
-            )
-            match = re.search(r"CUDA (?:UMD )?Version:\s*(\d+)\.(\d+)", result.stdout)
-            if result.returncode == 0 and match and tuple(map(int, match.groups())) >= (12, 8):
-                return "cu128"
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    return "cpu"
+def _detect_cuda_build() -> str | None:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"],
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+            creationflags=CREATE_FLAGS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    match = re.search(r"CUDA (?:UMD )?Version:\s*(\d+)\.(\d+)", result.stdout)
+    if result.returncode == 0 and match:
+        version = tuple(map(int, match.groups()))
+        if version >= (13, 2):
+            return "cu132"
+        if version >= (12, 8):
+            return "cu128"
+    return None
 
 
 class Installer:
@@ -92,22 +93,42 @@ class Installer:
         self.detail = ""
         self.failed = False
         self._closed = False
+        self._supports_cuda = sys.platform in ("win32", "linux") and platform.machine().lower() in ("amd64", "x86_64")
+        self._cuda_build = _detect_cuda_build() if self._supports_cuda else None
 
     @property
     def busy(self) -> bool:
         return self.task is not None and not self.task.done()
 
-    def _environment(self, build: str) -> Path:
-        return self.root / f"python312-torch{TORCH_VERSION}-{build}"
-
-    def python_path(self, device: str) -> Path | None:
-        builds = ("cu128", "cpu")
+    def _preferred_build(self, device: str) -> str | None:
         if device == "cpu":
-            builds = ("cpu", "cu128")
-        elif device.startswith("cuda"):
-            builds = ("cu128",)
-        for build in builds:
-            environment = self._environment(build)
+            return "cpu"
+        if device == "auto":
+            return self._cuda_build or "cpu"
+        return (self._cuda_build or "cu128") if self._supports_cuda else None
+
+    def _environment(self, build: str, version: str) -> Path:
+        return self.root / f"python312-torch{version}-{build}"
+
+    def python_path(self, device: str, *, preferred_only: bool = False) -> Path | None:
+        build = self._preferred_build(device)
+        if build is None:
+            return None
+        version = LEGACY_TORCH_VERSION if build == "cu128" else TORCH_VERSION
+        candidates = [(build, version)]
+        # Keep the ready environment usable while a preferred build is being installed.
+        if not preferred_only:
+            if build == "cu132":
+                candidates.append(("cu128", LEGACY_TORCH_VERSION))
+            if not device.startswith("cuda"):
+                candidates.extend((
+                    ("cpu", TORCH_VERSION),
+                    ("cpu", LEGACY_TORCH_VERSION),
+                    ("cu128", LEGACY_TORCH_VERSION),
+                    ("cu132", TORCH_VERSION),
+                ))
+        for candidate_build, candidate_version in candidates:
+            environment = self._environment(candidate_build, candidate_version)
             python = _python_in(environment)
             if (environment / ".ready").is_file() and python.is_file():
                 return python
@@ -138,7 +159,7 @@ class Installer:
 
     async def _install(self, size: ModelSize, device: str, manual_python: bool, manual_model: bool) -> None:
         try:
-            need_python = not manual_python and self.python_path(device) is None
+            need_python = not manual_python and self.python_path(device, preferred_only=True) is None
             need_model = not manual_model and self.model_path(size) is None
             if need_python or need_model:
                 self.root.mkdir(parents=True, exist_ok=True)
@@ -157,12 +178,22 @@ class Installer:
             self.detail = ""
 
     async def _install_python(self, uv: tuple[str, ...], device: str) -> None:
-        build = await asyncio.to_thread(_torch_build, device)
-        environment = self._environment(build)
+        build = self._preferred_build(device)
+        if build is None:
+            raise RuntimeError("一键安装 CUDA 环境适用于 Windows 或 Linux x86-64，请选择 CPU 或使用手动环境。")
+        version = LEGACY_TORCH_VERSION if build == "cu128" else TORCH_VERSION
+        environment = self._environment(build, version)
         ready = environment / ".ready"
         ready.unlink(missing_ok=True)
         python = str(_python_in(environment))
-        build_label = "CUDA 12.8" if build == "cu128" else "CPU"
+        build_label = {"cu128": "CUDA 12.8", "cu132": "CUDA 13.2", "cpu": "CPU"}[build]
+        torch_packages = [f"torch=={version}"]
+        requirements = Path(__file__).with_name("requirements-tts.txt").resolve()
+        tts_packages = ["-r", str(requirements)]
+        if build == "cu128":
+            torch_packages.append(f"torchaudio=={version}")
+        else:
+            tts_packages.append(f"torchaudio=={TORCHAUDIO_VERSION}")
         await self._run(
             f"环境 1/4 · 创建 Python 3.12 环境（{build_label}）",
             *uv,
@@ -178,14 +209,12 @@ class Installer:
             f"环境 2/4 · 安装 PyTorch（{build_label}）",
             *pip_install,
             *index,
-            f"torch=={TORCH_VERSION}",
-            f"torchaudio=={TORCH_VERSION}",
+            *torch_packages,
         )
-        requirements = Path(__file__).with_name("requirements-tts.txt").resolve()
-        await self._run("环境 3/4 · 安装 Qwen3-TTS 依赖", *pip_install, "-r", str(requirements))
+        await self._run("环境 3/4 · 安装 Qwen3-TTS 依赖", *pip_install, *tts_packages)
         check = "import torch, torchaudio, soundfile; from qwen_tts import Qwen3TTSModel"
-        if build == "cu128":
-            check += "; assert torch.cuda.is_available(), 'CUDA 12.8 不可用，请检查 NVIDIA 驱动或将推理设备设为 cpu'"
+        if build != "cpu":
+            check += f"; assert torch.cuda.is_available(), '{build_label} 不可用，请检查 NVIDIA 驱动或将推理设备设为 cpu'"
         await self._run("环境 4/4 · 验证推理依赖", python, "-I", "-X", "utf8", "-c", check)
         ready.touch()
 
@@ -255,6 +284,9 @@ class Installer:
 
 def _download_model(repo: str, destination: str) -> None:
     """Run in the small download environment, with a line-based progress feed."""
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "45")
+
     from huggingface_hub import HfApi, hf_hub_download
     from tqdm.auto import tqdm
 

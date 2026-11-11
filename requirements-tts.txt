@@ -1,1 +1,2 @@
-qwen_tts==0.1.1
+# Qwen3-TTS 0.1.1 requires Transformers 4.57.3. PyTorch is installed separately for the selected device.
+qwen-tts==0.1.1
